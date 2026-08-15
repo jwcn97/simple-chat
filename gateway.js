@@ -35,7 +35,7 @@ async function main() {
   wss.on('connection', async (ws, req) => {
     const url = new URL(req.url, `http://localhost:${port}`);
     const userId = url.searchParams.get('user');
-    const since = Number(url.searchParams.get('since')) || 0;
+    const afterId = Number(url.searchParams.get('afterId')) || 0;
 
     if (!userId) {
       ws.close(1008, 'missing ?user=<id>');
@@ -124,10 +124,10 @@ async function main() {
          JOIN conversations c ON c.id = m.conversation_id
          WHERE (c.user_a_id = $1 OR c.user_b_id = $1)
            AND m.sender_id != $1
-           AND m.created_at > to_timestamp($2 / 1000.0)
-         ORDER BY m.created_at ASC
+           AND m.id > $2
+         ORDER BY m.id ASC
          LIMIT 100`,
-        [userId, since]
+        [userId, afterId]
       );
       if (missed.rows.length > 0) {
         log(`replaying ${missed.rows.length} missed message(s) to ${userId}`);

@@ -19,9 +19,11 @@ if (!userId || !port) {
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
 // The cursor for catch-up: every reconnect asks the gateway for anything
-// after this point, so a dropped connection never loses a message — it
-// just arrives a little late, replayed from the database.
-let lastSeenTs = 0;
+// after this id, so a dropped connection never loses a message — it just
+// arrives a little late, replayed from the database. An id has no
+// precision to lose the way a millisecond timestamp round-tripped through
+// Postgres's microsecond-precision columns would.
+let lastSeenId = 0;
 let ws;
 
 // The gateway subscribes before it queries history, which closes the
@@ -30,7 +32,7 @@ let ws;
 const seenIds = new Set();
 
 function connect() {
-  ws = new WebSocket(`ws://localhost:${port}?user=${userId}&since=${lastSeenTs}`);
+  ws = new WebSocket(`ws://localhost:${port}?user=${userId}&afterId=${lastSeenId}`);
 
   ws.on('open', () => {
     console.log(`Connected as "${userId}" to gateway on port ${port}.`);
@@ -40,7 +42,7 @@ function connect() {
 
   ws.on('message', (raw) => {
     const { id, from, text, ts } = JSON.parse(raw.toString());
-    lastSeenTs = Math.max(lastSeenTs, ts);
+    lastSeenId = Math.max(lastSeenId, id);
     if (seenIds.has(id)) return;
     seenIds.add(id);
     const time = new Date(ts).toLocaleTimeString();
