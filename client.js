@@ -16,26 +16,42 @@ if (!userId || !port) {
   process.exit(1);
 }
 
-const ws = new WebSocket(`ws://localhost:${port}?user=${userId}`);
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
-ws.on('open', () => {
-  console.log(`Connected as "${userId}" to gateway on port ${port}.`);
-  console.log('Type "<recipient>:<message>" and press enter, e.g.  bob:hey there\n');
-  rl.prompt();
-});
+// The cursor for catch-up: every reconnect asks the gateway for anything
+// after this point, so a dropped connection never loses a message — it
+// just arrives a little late, replayed from the database.
+let lastSeenTs = 0;
+let ws;
 
-ws.on('message', (raw) => {
-  const { from, text, ts } = JSON.parse(raw.toString());
-  const time = new Date(ts).toLocaleTimeString();
-  console.log(`\n[${time}] ${from}: ${text}`);
-  rl.prompt();
-});
+function connect() {
+  ws = new WebSocket(`ws://localhost:${port}?user=${userId}&since=${lastSeenTs}`);
 
-ws.on('close', () => {
-  console.log('\nDisconnected.');
-  process.exit(0);
-});
+  ws.on('open', () => {
+    console.log(`Connected as "${userId}" to gateway on port ${port}.`);
+    console.log('Type "<recipient>:<message>" and press enter, e.g.  bob:hey there\n');
+    rl.prompt();
+  });
+
+  ws.on('message', (raw) => {
+    const { from, text, ts } = JSON.parse(raw.toString());
+    lastSeenTs = Math.max(lastSeenTs, ts);
+    const time = new Date(ts).toLocaleTimeString();
+    console.log(`\n[${time}] ${from}: ${text}`);
+    rl.prompt();
+  });
+
+  ws.on('close', () => {
+    console.log('\nDisconnected. Reconnecting in 1.5s...');
+    setTimeout(connect, 1500);
+  });
+
+  ws.on('error', () => {
+    // 'close' follows right after — the retry there covers it.
+  });
+}
+
+connect();
 
 rl.on('line', (line) => {
   const idx = line.indexOf(':');
