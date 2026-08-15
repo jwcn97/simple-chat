@@ -24,6 +24,11 @@ const rl = readline.createInterface({ input: process.stdin, output: process.stdo
 let lastSeenTs = 0;
 let ws;
 
+// The gateway subscribes before it queries history, which closes the
+// "message lost" gap but opens a much smaller "message delivered twice"
+// one instead — safe, as long as we dedupe by id here.
+const seenIds = new Set();
+
 function connect() {
   ws = new WebSocket(`ws://localhost:${port}?user=${userId}&since=${lastSeenTs}`);
 
@@ -34,8 +39,10 @@ function connect() {
   });
 
   ws.on('message', (raw) => {
-    const { from, text, ts } = JSON.parse(raw.toString());
+    const { id, from, text, ts } = JSON.parse(raw.toString());
     lastSeenTs = Math.max(lastSeenTs, ts);
+    if (seenIds.has(id)) return;
+    seenIds.add(id);
     const time = new Date(ts).toLocaleTimeString();
     console.log(`\n[${time}] ${from}: ${text}`);
     rl.prompt();
