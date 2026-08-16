@@ -4,11 +4,6 @@
 //
 // Once connected, type lines like:  bob:hello there
 // to send "hello there" to user "bob".
-//
-// Works against either gateway.js (Postgres, numeric `id` cursor) or
-// gateway-cassandra.js (Cassandra, composite `ts` + `messageId` cursor,
-// since a UUID has no numeric max) — whichever fields a given gateway
-// doesn't use are simply left at their defaults and ignored.
 
 import readline from 'readline';
 import WebSocket from 'ws';
@@ -23,21 +18,17 @@ if (!userId || !port) {
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
-// Postgres-style cursor: a single monotonic integer id.
-let lastSeenId = 0;
-// Cassandra-style cursor: a (timestamp, uuid) pair, matching the
-// clustering key — a plain number can't stand in for a UUID.
+// The cursor for catch-up: a (timestamp, message id) pair, matching the
+// table's clustering key exactly — message_id is a UUID, so a plain
+// numeric cursor can't represent it.
 let lastSeenTs = 0;
 let lastSeenMessageId = null;
 
 let ws;
-
-// Holds either numeric ids or UUID strings depending on which gateway
-// this session is talking to.
-const seenKeys = new Set();
+const seenIds = new Set();
 
 function connect() {
-  const params = new URLSearchParams({ user: userId, afterId: String(lastSeenId) });
+  const params = new URLSearchParams({ user: userId });
   if (lastSeenMessageId) {
     params.set('afterTs', String(lastSeenTs));
     params.set('afterMessageId', lastSeenMessageId);
@@ -51,18 +42,12 @@ function connect() {
   });
 
   ws.on('message', (raw) => {
-    const payload = JSON.parse(raw.toString());
-    const { from, text, ts } = payload;
+    const { messageId, from, text, ts } = JSON.parse(raw.toString());
+    lastSeenTs = ts;
+    lastSeenMessageId = messageId;
 
-    if (payload.id !== undefined) lastSeenId = Math.max(lastSeenId, payload.id);
-    if (payload.messageId !== undefined) {
-      lastSeenTs = ts;
-      lastSeenMessageId = payload.messageId;
-    }
-
-    const dedupeKey = payload.messageId ?? payload.id;
-    if (seenKeys.has(dedupeKey)) return;
-    seenKeys.add(dedupeKey);
+    if (seenIds.has(messageId)) return;
+    seenIds.add(messageId);
 
     const time = new Date(ts).toLocaleTimeString();
     console.log(`\n[${time}] ${from}: ${text}`);

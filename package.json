@@ -2,13 +2,12 @@
   "name": "simple-chat-connections-prototype",
   "version": "0.1.0",
   "private": true,
-  "description": "Minimal WebSocket + Redis pub/sub prototype for learning the connection layer of a chat system",
+  "description": "WebSocket + Redis pub/sub chat prototype, backed by Amazon Keyspaces (Cassandra)",
   "main": "gateway.js",
   "type": "module",
   "dependencies": {
     "ws": "^8.18.0",
     "redis": "^4.7.0",
-    "pg": "^8.13.0",
     "cassandra-driver": "^4.9.0"
   }
 }
