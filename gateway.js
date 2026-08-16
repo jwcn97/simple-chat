@@ -17,6 +17,9 @@ import {
   conversationIdFor,
   saveMessage,
   getInboxSince,
+  createGroup,
+  saveGroupMessage,
+  ValidationError,
 } from './db.js';
 
 const port = process.argv[2] || 3001;
@@ -64,30 +67,78 @@ async function main() {
       } catch {
         return;
       }
-      const { to, text } = payload;
-      if (!to || !text) return;
+
+      if (payload.createGroup) {
+        const { name, members } = payload.createGroup;
+        try {
+          const { groupId } = await createGroup({
+            creatorId: userId,
+            memberIds: members || [],
+            name,
+          });
+          log(`${userId} created group ${groupId} ("${name}")`);
+          ws.send(JSON.stringify({ groupCreated: { groupId, name } }));
+        } catch (err) {
+          if (err instanceof ValidationError) {
+            // A fixable mistake, not a broken connection — tell the
+            // client and keep the socket open.
+            ws.send(JSON.stringify({ error: err.message }));
+          } else {
+            log(`error creating group for ${userId}:`, err.message);
+            ws.close(1011, 'internal error');
+          }
+        }
+        return;
+      }
+
+      const { to, toGroup, text } = payload;
+      if (!text || (!to && !toGroup)) return;
 
       try {
-        const conversationId = conversationIdFor(userId, to);
-        const { messageId, createdAt } = await saveMessage({
-          conversationId,
-          senderId: userId,
-          recipientId: to,
-          text,
-        });
+        if (toGroup) {
+          const { messageId, createdAt, recipients, failedRecipients, groupName } =
+            await saveGroupMessage({ groupId: toGroup, senderId: userId, text });
 
-        const event = JSON.stringify({
-          messageId: messageId.toString(),
-          from: userId,
-          to,
-          text,
-          ts: createdAt.getTime(),
-        });
-        log(`${userId} -> saved + publish user:${to}: "${text}"`);
-        await publisher.publish(`user:${to}`, event);
+          if (failedRecipients.length > 0) {
+            log(`fan-out gap for group ${toGroup}: ${failedRecipients.join(', ')}`);
+          }
+
+          const event = JSON.stringify({
+            messageId: messageId.toString(),
+            from: userId,
+            toGroup,
+            groupName,
+            text,
+            ts: createdAt.getTime(),
+          });
+          log(`${userId} -> saved + publish to group ${toGroup} (${recipients.length} recipient(s))`);
+          await Promise.allSettled(recipients.map((r) => publisher.publish(`user:${r}`, event)));
+        } else {
+          const conversationId = conversationIdFor(userId, to);
+          const { messageId, createdAt } = await saveMessage({
+            conversationId,
+            senderId: userId,
+            recipientId: to,
+            text,
+          });
+
+          const event = JSON.stringify({
+            messageId: messageId.toString(),
+            from: userId,
+            to,
+            text,
+            ts: createdAt.getTime(),
+          });
+          log(`${userId} -> saved + publish user:${to}: "${text}"`);
+          await publisher.publish(`user:${to}`, event);
+        }
       } catch (err) {
-        log(`error handling message from ${userId}:`, err.message);
-        ws.close(1011, 'internal error');
+        if (err instanceof ValidationError) {
+          ws.send(JSON.stringify({ error: err.message }));
+        } else {
+          log(`error handling message from ${userId}:`, err.message);
+          ws.close(1011, 'internal error');
+        }
       }
     });
 
@@ -114,10 +165,13 @@ async function main() {
         log(`replaying ${missed.length} missed message(s) to ${userId}`);
       }
       for (const row of missed) {
+        const isGroup = row.conversation_type === 'group';
         ws.send(JSON.stringify({
           messageId: row.message_id.toString(),
           from: row.sender_id,
-          to: userId,
+          ...(isGroup
+            ? { toGroup: row.conversation_id, groupName: row.group_name }
+            : { to: userId }),
           text: row.text,
           ts: row.created_at.getTime(),
         }));

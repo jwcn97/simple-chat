@@ -1,0 +1,12 @@
+{
+  "allColumns": [
+    { "name": "group_id", "type": "text" },
+    { "name": "user_id", "type": "text" }
+  ],
+  "partitionKeys": [
+    { "name": "group_id" }
+  ],
+  "clusteringKeys": [
+    { "name": "user_id", "orderBy": "ASC" }
+  ]
+}

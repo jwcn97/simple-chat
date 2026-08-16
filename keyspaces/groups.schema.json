@@ -1,0 +1,11 @@
+{
+  "allColumns": [
+    { "name": "group_id", "type": "text" },
+    { "name": "name", "type": "text" },
+    { "name": "creator_id", "type": "text" },
+    { "name": "created_at", "type": "timestamp" }
+  ],
+  "partitionKeys": [
+    { "name": "group_id" }
+  ]
+}
