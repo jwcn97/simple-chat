@@ -98,7 +98,28 @@ export async function createGroup({ creatorId, memberIds, name }) {
     )
   ));
 
-  return { groupId, name, members };
+  // Without this, other members would have no way to discover the group
+  // (or its id, needed to address messages to it) until the creator
+  // happened to send a real message — and never at all if none was sent.
+  // This reuses the exact same inbox_by_user + catch-up path a real
+  // message uses, so the notification survives a member being offline
+  // right now, same as any missed message would. One shared message_id
+  // fanned out to every recipient's inbox, same shape as saveGroupMessage
+  // below — and same best-effort reasoning: allSettled, not all.
+  const noticeId = cassandra.types.Uuid.random();
+  const recipients = members.filter((id) => id !== creatorId);
+  const results = await Promise.allSettled(recipients.map((userId) =>
+    client.execute(
+      `INSERT INTO inbox_by_user
+         (user_id, created_at, message_id, conversation_id, sender_id, text, conversation_type, group_name)
+       VALUES (?, ?, ?, ?, ?, ?, 'group', ?)`,
+      [userId, createdAt, noticeId, groupId, creatorId, 'added you to the group', name],
+      { prepare: true }
+    )
+  ));
+  const failedRecipients = recipients.filter((_, i) => results[i].status === 'rejected');
+
+  return { groupId, name, members, recipients, failedRecipients, noticeId, createdAt };
 }
 
 export async function getGroupMembers(groupId) {

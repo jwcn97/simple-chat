@@ -71,13 +71,29 @@ async function main() {
       if (payload.createGroup) {
         const { name, members } = payload.createGroup;
         try {
-          const { groupId } = await createGroup({
+          const { groupId, recipients, failedRecipients, noticeId, createdAt } = await createGroup({
             creatorId: userId,
             memberIds: members || [],
             name,
           });
-          log(`${userId} created group ${groupId} ("${name}")`);
+          log(`${userId} created group ${groupId} ("${name}") with ${recipients.length} other member(s)`);
+          if (failedRecipients.length > 0) {
+            log(`group-created notice gap for ${groupId}: ${failedRecipients.join(', ')}`);
+          }
           ws.send(JSON.stringify({ groupCreated: { groupId, name } }));
+
+          // Let everyone else know, live if they're online right now —
+          // offline members still get this via inbox catch-up, same as
+          // any other message.
+          const noticeEvent = JSON.stringify({
+            messageId: noticeId.toString(),
+            from: userId,
+            toGroup: groupId,
+            groupName: name,
+            text: 'added you to the group',
+            ts: createdAt.getTime(),
+          });
+          await Promise.allSettled(recipients.map((r) => publisher.publish(`user:${r}`, noticeEvent)));
         } catch (err) {
           if (err instanceof ValidationError) {
             // A fixable mistake, not a broken connection — tell the
