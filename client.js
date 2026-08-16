@@ -4,6 +4,11 @@
 //
 // Once connected, type lines like:  bob:hello there
 // to send "hello there" to user "bob".
+//
+// Works against either gateway.js (Postgres, numeric `id` cursor) or
+// gateway-cassandra.js (Cassandra, composite `ts` + `messageId` cursor,
+// since a UUID has no numeric max) — whichever fields a given gateway
+// doesn't use are simply left at their defaults and ignored.
 
 import readline from 'readline';
 import WebSocket from 'ws';
@@ -18,21 +23,26 @@ if (!userId || !port) {
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
-// The cursor for catch-up: every reconnect asks the gateway for anything
-// after this id, so a dropped connection never loses a message — it just
-// arrives a little late, replayed from the database. An id has no
-// precision to lose the way a millisecond timestamp round-tripped through
-// Postgres's microsecond-precision columns would.
+// Postgres-style cursor: a single monotonic integer id.
 let lastSeenId = 0;
+// Cassandra-style cursor: a (timestamp, uuid) pair, matching the
+// clustering key — a plain number can't stand in for a UUID.
+let lastSeenTs = 0;
+let lastSeenMessageId = null;
+
 let ws;
 
-// The gateway subscribes before it queries history, which closes the
-// "message lost" gap but opens a much smaller "message delivered twice"
-// one instead — safe, as long as we dedupe by id here.
-const seenIds = new Set();
+// Holds either numeric ids or UUID strings depending on which gateway
+// this session is talking to.
+const seenKeys = new Set();
 
 function connect() {
-  ws = new WebSocket(`ws://localhost:${port}?user=${userId}&afterId=${lastSeenId}`);
+  const params = new URLSearchParams({ user: userId, afterId: String(lastSeenId) });
+  if (lastSeenMessageId) {
+    params.set('afterTs', String(lastSeenTs));
+    params.set('afterMessageId', lastSeenMessageId);
+  }
+  ws = new WebSocket(`ws://localhost:${port}?${params}`);
 
   ws.on('open', () => {
     console.log(`Connected as "${userId}" to gateway on port ${port}.`);
@@ -41,10 +51,19 @@ function connect() {
   });
 
   ws.on('message', (raw) => {
-    const { id, from, text, ts } = JSON.parse(raw.toString());
-    lastSeenId = Math.max(lastSeenId, id);
-    if (seenIds.has(id)) return;
-    seenIds.add(id);
+    const payload = JSON.parse(raw.toString());
+    const { from, text, ts } = payload;
+
+    if (payload.id !== undefined) lastSeenId = Math.max(lastSeenId, payload.id);
+    if (payload.messageId !== undefined) {
+      lastSeenTs = ts;
+      lastSeenMessageId = payload.messageId;
+    }
+
+    const dedupeKey = payload.messageId ?? payload.id;
+    if (seenKeys.has(dedupeKey)) return;
+    seenKeys.add(dedupeKey);
+
     const time = new Date(ts).toLocaleTimeString();
     console.log(`\n[${time}] ${from}: ${text}`);
     rl.prompt();

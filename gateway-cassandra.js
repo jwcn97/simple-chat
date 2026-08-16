@@ -1,0 +1,135 @@
+// gateway-cassandra.js — the same WebSocket + Redis pub/sub gateway as
+// gateway.js, backed by Amazon Keyspaces instead of Postgres. The
+// WebSocket/pub-sub logic is unchanged; only persistence differs — see
+// db-cassandra.js for the hybrid-sharded storage layer.
+//
+// Usage: node gateway-cassandra.js <port> <gatewayName>
+// Example: node gateway-cassandra.js 3001 gateway-1
+
+import http from 'http';
+import { WebSocketServer } from 'ws';
+import { createClient } from 'redis';
+import {
+  client as cassandraClient,
+  conversationIdFor,
+  saveMessage,
+  getInboxSince,
+} from './db-cassandra.js';
+
+const port = process.argv[2] || 3001;
+const name = process.argv[3] || `gateway-${port}`;
+
+function log(...args) {
+  console.log(`[${name}]`, ...args);
+}
+
+async function main() {
+  await cassandraClient.connect();
+
+  const publisher = createClient();
+  const subscriber = publisher.duplicate();
+  await publisher.connect();
+  await subscriber.connect();
+
+  const localSockets = new Map();
+
+  const server = http.createServer();
+  const wss = new WebSocketServer({ server });
+
+  wss.on('connection', async (ws, req) => {
+    const url = new URL(req.url, `http://localhost:${port}`);
+    const userId = url.searchParams.get('user');
+    const afterTs = Number(url.searchParams.get('afterTs')) || 0;
+    const afterMessageId = url.searchParams.get('afterMessageId') || null;
+
+    if (!userId) {
+      ws.close(1008, 'missing ?user=<id>');
+      return;
+    }
+
+    log(`${userId} connected`);
+    localSockets.set(userId, ws);
+    const channel = `user:${userId}`;
+
+    // Same reasoning as gateway.js: register these before any `await`, so
+    // a message sent the instant the connection opens can't be dropped.
+    ws.on('message', async (raw) => {
+      let payload;
+      try {
+        payload = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+      const { to, text } = payload;
+      if (!to || !text) return;
+
+      try {
+        const conversationId = conversationIdFor(userId, to);
+        const { messageId, createdAt } = await saveMessage({
+          conversationId,
+          senderId: userId,
+          recipientId: to,
+          text,
+        });
+
+        const event = JSON.stringify({
+          messageId: messageId.toString(),
+          from: userId,
+          to,
+          text,
+          ts: createdAt.getTime(),
+        });
+        log(`${userId} -> saved + publish user:${to}: "${text}"`);
+        await publisher.publish(`user:${to}`, event);
+      } catch (err) {
+        log(`error handling message from ${userId}:`, err.message);
+        ws.close(1011, 'internal error');
+      }
+    });
+
+    ws.on('close', async () => {
+      log(`${userId} disconnected`);
+      localSockets.delete(userId);
+      try {
+        await subscriber.unsubscribe(channel);
+      } catch (err) {
+        log(`error unsubscribing ${userId}:`, err.message);
+      }
+    });
+
+    try {
+      await subscriber.subscribe(channel, (message) => {
+        log(`delivering to ${userId} (via Redis channel ${channel})`);
+        ws.send(message);
+      });
+
+      // Single-partition read, no join — the payoff of sharding by
+      // user_id instead of scatter-gathering across conversations.
+      const missed = await getInboxSince(userId, afterTs, afterMessageId);
+      if (missed.length > 0) {
+        log(`replaying ${missed.length} missed message(s) to ${userId}`);
+      }
+      for (const row of missed) {
+        ws.send(JSON.stringify({
+          messageId: row.message_id.toString(),
+          from: row.sender_id,
+          to: userId,
+          text: row.text,
+          ts: row.created_at.getTime(),
+        }));
+      }
+    } catch (err) {
+      log(`error setting up ${userId}:`, err.message);
+      ws.close(1011, 'internal error');
+    }
+  });
+
+  server.listen(port, () => {
+    log(`listening on ws://localhost:${port}`);
+  });
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
