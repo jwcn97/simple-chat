@@ -1,0 +1,17 @@
+{
+  "allColumns": [
+    { "name": "user_id", "type": "text" },
+    { "name": "created_at", "type": "timestamp" },
+    { "name": "message_id", "type": "uuid" },
+    { "name": "conversation_id", "type": "text" },
+    { "name": "sender_id", "type": "text" },
+    { "name": "text", "type": "text" }
+  ],
+  "partitionKeys": [
+    { "name": "user_id" }
+  ],
+  "clusteringKeys": [
+    { "name": "created_at", "orderBy": "DESC" },
+    { "name": "message_id", "orderBy": "ASC" }
+  ]
+}
