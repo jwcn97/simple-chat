@@ -21,3 +21,7 @@ logs/
 # Keyspaces setup notes — not source, no need to track)
 server/keyspaces/*.pem
 server/keyspaces/*.crt
+
+# JWT signing key pair (regenerate via openssl — private.pem is a real
+# secret, never commit it)
+server/keys/

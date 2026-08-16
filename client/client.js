@@ -1,6 +1,10 @@
 // client.js — a minimal interactive chat client for talking to a gateway.
-// Usage: npm run client -- <yourUserId> <gatewayPort>
-// Example: npm run client -- alice 3001
+// Usage: npm run client -- <username> <password> <gatewayPort> [--signup]
+// Example: npm run client -- alice hunter2 3001 --signup
+//
+// Logs in against auth.js (creating the account first if --signup is
+// given) before ever touching the gateway — the gateway only accepts a
+// signed token now, not a self-reported username.
 //
 // Once connected:
 //   bob:hello there                       send "hello there" to user "bob"
@@ -10,12 +14,28 @@
 import readline from 'readline';
 import WebSocket from 'ws';
 
-const userId = process.argv[2];
-const port = process.argv[3];
+const username = process.argv[2];
+const password = process.argv[3];
+const port = process.argv[4];
+const shouldSignup = process.argv.includes('--signup');
+const authUrl = process.env.AUTH_URL || 'http://localhost:4000';
 
-if (!userId || !port) {
-  console.error('Usage: node client.js <yourUserId> <gatewayPort>');
+if (!username || !password || !port) {
+  console.error('Usage: node client.js <username> <password> <gatewayPort> [--signup]');
   process.exit(1);
+}
+
+async function authFetch(path, body) {
+  const res = await fetch(`${authUrl}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error || `auth request failed (${res.status})`);
+  }
+  return data;
 }
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -29,8 +49,21 @@ let lastSeenMessageId = null;
 let ws;
 const seenIds = new Set();
 
-function connect() {
-  const params = new URLSearchParams({ user: userId });
+async function connect() {
+  let token;
+  try {
+    // Re-login on every (re)connect, not just once at startup — tokens
+    // expire, and this way a stale one self-heals on the next reconnect
+    // instead of retrying forever with something the gateway will keep
+    // rejecting.
+    ({ token } = await authFetch('/login', { username, password }));
+  } catch (err) {
+    console.error(`Login failed: ${err.message}. Retrying in 1.5s...`);
+    setTimeout(connect, 1500);
+    return;
+  }
+
+  const params = new URLSearchParams({ token });
   if (lastSeenMessageId) {
     params.set('afterTs', String(lastSeenTs));
     params.set('afterMessageId', lastSeenMessageId);
@@ -38,7 +71,7 @@ function connect() {
   ws = new WebSocket(`ws://localhost:${port}?${params}`);
 
   ws.on('open', () => {
-    console.log(`Connected as "${userId}" to gateway on port ${port}.`);
+    console.log(`Connected as "${username}" to gateway on port ${port}.`);
     console.log('Type "<recipient>:<message>", "#<groupId>:<message>", or "/creategroup <name> <a>,<b>,<c>"\n');
     rl.prompt();
   });
@@ -82,7 +115,20 @@ function connect() {
   });
 }
 
-connect();
+async function main() {
+  if (shouldSignup) {
+    try {
+      await authFetch('/signup', { username, password });
+      console.log(`Account "${username}" created.`);
+    } catch (err) {
+      console.error(`Signup failed: ${err.message}`);
+      process.exit(1);
+    }
+  }
+  connect();
+}
+
+main();
 
 rl.on('line', (line) => {
   if (line.startsWith('/creategroup ')) {

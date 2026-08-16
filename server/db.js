@@ -44,6 +44,31 @@ export function conversationIdFor(userA, userB) {
 // whether to send an error and keep the connection open, or close it.
 export class ValidationError extends Error {}
 
+// Signup needs a real uniqueness guarantee, which a plain INSERT doesn't
+// give in Cassandra — it silently overwrites on a duplicate key rather
+// than failing. IF NOT EXISTS makes this a lightweight transaction: the
+// [applied] flag in the result tells us whether the insert actually
+// happened, so a taken username gets rejected instead of clobbered.
+export async function createUser({ username, passwordHash }) {
+  const result = await client.execute(
+    `INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?) IF NOT EXISTS`,
+    [username, passwordHash, new Date()],
+    { prepare: true }
+  );
+  if (!result.first().get('[applied]')) {
+    throw new ValidationError(`username "${username}" is already taken`);
+  }
+}
+
+export async function findUserByUsername(username) {
+  const result = await client.execute(
+    `SELECT username, password_hash FROM users WHERE username = ?`,
+    [username],
+    { prepare: true }
+  );
+  return result.first() || null;
+}
+
 // Fan-out-on-write: one send becomes two inserts — the conversation's own
 // timeline (messages_by_conversation) and a copy in the recipient's inbox
 // (inbox_by_user) for join-free catch-up across every conversation they're

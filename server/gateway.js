@@ -4,14 +4,21 @@
 // by conversation) + inbox_by_user (partitioned by user) for join-free
 // catch-up. Run several instances on different ports to simulate multiple
 // gateway machines behind a load balancer, all sharing one Redis broker.
-// See db.js for the storage layer.
+// See db.js for the storage layer, auth.js for how tokens get issued.
+//
+// Connections authenticate with a token from auth.js (?token=<jwt>), not
+// a self-reported username — see the verification block below.
 //
 // Usage: npm run gateway -- <port> <gatewayName>
 // Example: npm run gateway -- 3001 gateway-1
 
 import http from 'http';
+import { readFileSync } from 'fs';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 import { WebSocketServer } from 'ws';
 import { createClient } from 'redis';
+import jwt from 'jsonwebtoken';
 import {
   client as cassandraClient,
   conversationIdFor,
@@ -22,8 +29,13 @@ import {
   ValidationError,
 } from './db.js';
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
 const port = process.argv[2] || 3001;
 const name = process.argv[3] || `gateway-${port}`;
+
+// Only the public key — this process can verify tokens but never mint
+// them, even if compromised. auth.js is the only holder of the private key.
+const publicKey = readFileSync(join(__dirname, 'keys', 'public.pem'), 'utf-8');
 
 function log(...args) {
   console.log(`[${name}]`, ...args);
@@ -44,12 +56,26 @@ async function main() {
 
   wss.on('connection', async (ws, req) => {
     const url = new URL(req.url, `http://localhost:${port}`);
-    const userId = url.searchParams.get('user');
+    const token = url.searchParams.get('token');
     const afterTs = Number(url.searchParams.get('afterTs')) || 0;
     const afterMessageId = url.searchParams.get('afterMessageId') || null;
 
-    if (!userId) {
-      ws.close(1008, 'missing ?user=<id>');
+    if (!token) {
+      ws.close(1008, 'missing ?token=<jwt>');
+      return;
+    }
+
+    let userId;
+    try {
+      // Pinning `algorithms` explicitly matters, not just formally — it's
+      // what stops the classic "algorithm confusion" attack, where a
+      // verifier that trusts whatever algorithm a token *claims* can be
+      // tricked into accepting a forged token signed a different way.
+      const decoded = jwt.verify(token, publicKey, { algorithms: ['RS256'] });
+      userId = decoded.sub;
+    } catch (err) {
+      log(`rejected connection: invalid token (${err.message})`);
+      ws.close(1008, 'invalid or expired token');
       return;
     }
 

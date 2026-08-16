@@ -1,0 +1,10 @@
+{
+  "allColumns": [
+    { "name": "username", "type": "text" },
+    { "name": "password_hash", "type": "text" },
+    { "name": "created_at", "type": "timestamp" }
+  ],
+  "partitionKeys": [
+    { "name": "username" }
+  ]
+}
