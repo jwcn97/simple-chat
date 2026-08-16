@@ -1,6 +1,6 @@
 // client.js — a minimal interactive chat client for talking to a gateway.
-// Usage: node client.js <yourUserId> <gatewayPort>
-// Example: node client.js alice 3001
+// Usage: npm run client -- <yourUserId> <gatewayPort>
+// Example: npm run client -- alice 3001
 //
 // Once connected:
 //   bob:hello there                       send "hello there" to user "bob"

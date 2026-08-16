@@ -19,5 +19,5 @@ logs/
 
 # Downloaded TLS trust certs (regenerate via the curl commands in the
 # Keyspaces setup notes — not source, no need to track)
-keyspaces/*.pem
-keyspaces/*.crt
+server/keyspaces/*.pem
+server/keyspaces/*.crt

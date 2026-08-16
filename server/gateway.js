@@ -6,8 +6,8 @@
 // gateway machines behind a load balancer, all sharing one Redis broker.
 // See db.js for the storage layer.
 //
-// Usage: node --env-file=.env gateway.js <port> <gatewayName>
-// Example: node --env-file=.env gateway.js 3001 gateway-1
+// Usage: npm run gateway -- <port> <gatewayName>
+// Example: npm run gateway -- 3001 gateway-1
 
 import http from 'http';
 import { WebSocketServer } from 'ws';
