@@ -69,6 +69,52 @@ export async function findUserByUsername(username) {
   return result.first() || null;
 }
 
+// Fan-out into the sender's AND every recipient's conversation list, one
+// row per participant, so "my conversations" (getConversationsForUser,
+// below) stays a single-partition read with no join. last_message_at has
+// to be part of the clustering key to sort by recency, which means a new
+// message doesn't update the existing row in place — it inserts a fresh
+// one and leaves the old one behind, stale. Rather than pay for a
+// read-before-write to find and delete that stale row, the read side
+// dedupes instead: the newest row for a conversation always sorts above
+// any older one, so keeping only the first occurrence of each
+// conversation_id while scanning top-to-bottom is correct — the same
+// at-least-once-plus-dedupe shape already used for message catch-up,
+// applied one level up. Best-effort (allSettled): a failed bump here
+// leaves the sidebar briefly stale, not a lost message — the durable
+// write already happened before this is ever called.
+async function upsertConversationSummary({ userId, conversationId, conversationType, displayName, lastMessagePreview, lastMessageAt }) {
+  await client.execute(
+    `INSERT INTO conversations_by_user
+       (user_id, last_message_at, conversation_id, conversation_type, display_name, last_message_preview)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [userId, lastMessageAt, conversationId, conversationType, displayName, lastMessagePreview],
+    { prepare: true }
+  );
+}
+
+export async function getConversationsForUser(userId, limit = 30) {
+  const result = await client.execute(
+    `SELECT conversation_id, conversation_type, display_name, last_message_preview, last_message_at
+     FROM conversations_by_user
+     WHERE user_id = ?
+     ORDER BY last_message_at DESC, conversation_id ASC
+     LIMIT 100`,
+    [userId],
+    { prepare: true }
+  );
+
+  const seen = new Set();
+  const deduped = [];
+  for (const row of result.rows) {
+    if (seen.has(row.conversation_id)) continue;
+    seen.add(row.conversation_id);
+    deduped.push(row);
+    if (deduped.length >= limit) break;
+  }
+  return deduped;
+}
+
 // Fan-out-on-write: one send becomes two inserts — the conversation's own
 // timeline (messages_by_conversation) and a copy in the recipient's inbox
 // (inbox_by_user) for join-free catch-up across every conversation they're
@@ -93,6 +139,13 @@ export async function saveMessage({ conversationId, senderId, recipientId, text 
     [recipientId, createdAt, messageId, conversationId, senderId, text],
     { prepare: true }
   );
+
+  // Each side sees the OTHER participant's username as the display name
+  // — unlike a group, a 1:1 conversation has no shared "name" of its own.
+  await Promise.allSettled([
+    upsertConversationSummary({ userId: senderId, conversationId, conversationType: 'direct', displayName: recipientId, lastMessagePreview: text, lastMessageAt: createdAt }),
+    upsertConversationSummary({ userId: recipientId, conversationId, conversationType: 'direct', displayName: senderId, lastMessagePreview: text, lastMessageAt: createdAt }),
+  ]);
 
   return { messageId, createdAt };
 }
@@ -143,6 +196,19 @@ export async function createGroup({ creatorId, memberIds, name }) {
     )
   ));
   const failedRecipients = recipients.filter((_, i) => results[i].status === 'rejected');
+
+  // Every member, including the creator, so the group shows up in
+  // everyone's list right away — not just once someone sends to it.
+  await Promise.allSettled(members.map((userId) =>
+    upsertConversationSummary({
+      userId,
+      conversationId: groupId,
+      conversationType: 'group',
+      displayName: name,
+      lastMessagePreview: `${creatorId} created this group`,
+      lastMessageAt: createdAt,
+    })
+  ));
 
   return { groupId, name, members, recipients, failedRecipients, noticeId, createdAt };
 }
@@ -195,6 +261,12 @@ export async function saveGroupMessage({ groupId, senderId, text }) {
     )
   ));
   const failedRecipients = recipients.filter((_, i) => results[i].status === 'rejected');
+
+  // members, not recipients — the sender's own list should bump too, so
+  // a group they just posted in moves back to the top for them as well.
+  await Promise.allSettled(members.map((userId) =>
+    upsertConversationSummary({ userId, conversationId: groupId, conversationType: 'group', displayName: groupName, lastMessagePreview: text, lastMessageAt: createdAt })
+  ));
 
   return { messageId, createdAt, recipients, failedRecipients, groupName };
 }

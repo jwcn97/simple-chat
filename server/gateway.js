@@ -26,6 +26,7 @@ import {
   getInboxSince,
   createGroup,
   saveGroupMessage,
+  getConversationsForUser,
   ValidationError,
 } from './db.js';
 
@@ -199,6 +200,20 @@ async function main() {
         log(`delivering to ${userId} (via Redis channel ${channel})`);
         ws.send(message);
       });
+
+      // Sent once, at connect — the client maintains its own copy from
+      // here, reordering/updating it locally as new message events (below)
+      // arrive, rather than the server pushing a fresh list on every send.
+      const conversations = await getConversationsForUser(userId);
+      ws.send(JSON.stringify({
+        conversations: conversations.map((row) => ({
+          conversationId: row.conversation_id,
+          conversationType: row.conversation_type,
+          displayName: row.display_name,
+          lastMessagePreview: row.last_message_preview,
+          lastMessageAt: row.last_message_at.getTime(),
+        })),
+      }));
 
       // Single-partition read, no join — the payoff of sharding by
       // user_id instead of scatter-gathering across conversations.
